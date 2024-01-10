@@ -1,6 +1,7 @@
 # Rust Telegram Bot
 
-This is a Rust application that interacts with the Telegram API. Follow the steps below to set up your Telegram bot and run the application locally.
+
+This Rust application interacts with the Telegram API. Follow the steps below to set up your Telegram bot and run the application locally.
 
 ## Getting Started
 
@@ -12,8 +13,8 @@ This is a Rust application that interacts with the Telegram API. Follow the step
 
 3. After completing the setup, BotFather will provide you with a token. Keep this token secure, as it's necessary for interacting with the Telegram API.
 
-## Set Privacy Mode (Optional):
-If your bot needs to access messages from groups or channels, you might need to disable privacy mode. Type /setprivacy to BotFather and select your bot. Then, choose "Disable" to allow the bot to receive all messages in groups. Finally, promote your bot to an admin in the group.
+#### Set Privacy Mode (Optional):
+If your bot needs to access messages from groups or channels, you might need to disable privacy mode. Type `/setprivacy` to BotFather and select your bot. Then, choose "Disable" to allow the bot to receive all messages in groups. Finally, promote your bot to an admin in the group.
 
 ### 2. Set Up Ngrok for Local Testing
 
@@ -25,6 +26,7 @@ If your bot needs to access messages from groups or channels, you might need to 
 
    ```bash
    ngrok http 8080
+Replace 8080 with the port your Rust application is running on.
 
 ### 3. Update telegram webhook
 1. Replace '<YOUR_BOT_TOKEN>' with the bot token obtained from step 1 and '<YOUR_NGROK_URL>' with the url obtained from step 2.
