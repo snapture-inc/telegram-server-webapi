@@ -1,0 +1,118 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Infrastructure for Telegram Server Webapi
+
+Parameters:
+  accountStackName:
+    Type: String
+    Default: cld-core-account
+  networkStackName:
+    Type: String
+    Default: cld-core-network
+  accountType:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - prod
+  dbName:
+    Description: The name of the database
+    Type: String
+    Default: tg_server
+  dbClusterPort:
+    Description: The port number on which the DB instances is the cluster accept connections
+    Type: Number
+    Default: 5432
+
+Conditions:
+  isProd: !Equals [!Ref accountType, 'prod']
+
+Resources:
+  s3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Join ['-', ['snapture', { Fn::ImportValue: !Sub '${accountStackName}-${AWS::Region}-envName' }, !Sub '${AWS::StackName}']]
+      Tags:
+        - Key: Stack_Name
+          Value: !Ref AWS::StackName
+
+  auroraServerlessCluster:
+    Type: AWS::RDS::DBCluster
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      DBClusterIdentifier: !Sub ${AWS::StackName}
+      DatabaseName: !Ref dbName
+      Engine: aurora-postgresql
+      MasterUsername: !Sub '{{resolve:secretsmanager:${dbClusterCredentials}:SecretString:username}}'
+      ServerlessV2ScalingConfiguration:
+        MinCapacity: 0.5
+        MaxCapacity: 2 # max is 128 ACUs
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${dbClusterCredentials}:SecretString:password}}'
+      DeletionProtection: !If [isProd, true, false]
+      Port: !Ref dbClusterPort
+      DBSubnetGroupName: !Ref subnetGroup
+      VpcSecurityGroupIds:
+        - !GetAtt securityGroup.GroupId
+      Tags:
+        - Key: Stack_Name
+          Value: !Ref AWS::StackName
+
+  auroraInstance1:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      AvailabilityZone: !Sub ${AWS::Region}a
+      Engine: aurora-postgresql
+      DBInstanceClass: db.serverless
+      DBClusterIdentifier: !Ref auroraServerlessCluster
+      DBInstanceIdentifier: !Sub ${AWS::StackName}-az1
+      PubliclyAccessible: false
+
+  dbClusterCredentials:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub ${AWS::StackName}-db-cluster-credentials
+      Description: Database cluster credentials for Telegram Server Webapi
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "root"}'
+        GenerateStringKey: password
+        PasswordLength: 16
+        ExcludePunctuation: true
+      Tags:
+        - Key: Stack_Name
+          Value: !Ref AWS::StackName
+
+  dbClusterCredentialAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId: !Ref dbClusterCredentials
+      TargetId: !Ref auroraServerlessCluster
+      TargetType: AWS::RDS::DBCluster
+
+  subnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for Telegam Server Webapi Aurora cluster
+      DBSubnetGroupName: !Join ['-', [!Sub '${AWS::StackName}', { Fn::ImportValue: !Sub '${accountStackName}-${AWS::Region}-envName' }, 'db-subnet-group']]
+      SubnetIds:
+        - { Fn::ImportValue: !Sub '${networkStackName}-${AWS::Region}-privateSubnetAZ1' }
+        - { Fn::ImportValue: !Sub '${networkStackName}-${AWS::Region}-privateSubnetAZ2' }
+      Tags:
+        - Key: Stack_Name
+          Value: !Ref AWS::StackName
+
+  securityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Permits access to Telegram Server Webapi Aurora cluster
+      VpcId: { Fn::ImportValue: !Sub '${networkStackName}-${AWS::Region}-VPC' }
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref dbClusterPort
+          ToPort: !Ref dbClusterPort
+          CidrIp: { Fn::ImportValue: !Sub '${networkStackName}-${AWS::Region}-vpcCIDRBlock' }
