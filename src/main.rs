@@ -2,6 +2,14 @@ use actix_web::{web, App, HttpServer, Result, HttpResponse};
 use serde::{Deserialize, Serialize};
 use reqwest::Client;
 use std::collections::HashMap;
+use tokio::fs::{self, File};
+use tokio::io::AsyncWriteExt;
+
+mod config;
+use config::Config;
+lazy_static::lazy_static! {
+    static ref CONFIG: Config = Config::load();
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct From {
@@ -80,25 +88,79 @@ async fn handle_update(update: web::Json<TelegramUpdate>) -> Result<HttpResponse
 
     // Check if the message has photos
     if let Some(photos) = &telegram_update.message.photo {
-        // Filter photos with widths 600 and 800
-        let filtered_photos: Vec<&Photo> = photos
+        // Filter photos with widths 450, 600 and 800
+        let filtered_photo: Vec<&Photo> = photos
             .iter()
-            .filter(|photo| photo.width == 600 || photo.width == 800)
+            .filter(|photo| photo.width == 600 || photo.width == 800 || photo.width == 450)
             .collect();
 
         // Serialize the filtered photos to a JSON string
-        let serialized_photos = serde_json::to_string(&filtered_photos).unwrap();
+        let serialized_photo = serde_json::to_string(&filtered_photo).unwrap();
+        println!("{}", serialized_photo);
 
-        // Do something with the serialized photos
-        println!("{}", serialized_photos);
         // Check if the message has a caption
         if let Some(caption) = &telegram_update.message.caption {
             println!("with caption: {}", caption);
+        }
+
+        // Download and save each photo
+        for photo in filtered_photo {
+            if let Some(file_url) = get_photo_url(&photo.file_id).await {
+                // Create a folder for the photos
+                let folder_path = format!("photos/{}", group_name);
+                fs::create_dir_all(&folder_path).await.unwrap();
+                println!("Downloading file.........");
+                download_and_save_photo(file_url, &folder_path, &photo.file_id).await;
+            }
         }
     }
 
     // Respond with a simple message
     Ok(HttpResponse::Ok().body("Update received successfully"))
+}
+
+async fn get_photo_url(file_id: &str) -> Option<String> {
+    // You need to replace <YOUR_BOT_TOKEN> with your actual bot token
+    let bot_token = &CONFIG.telegram_bot_token;
+    let url = format!(
+        "https://api.telegram.org/bot{}/getFile?file_id={}",
+        bot_token, file_id
+    );
+
+    let response = reqwest::get(&url).await.ok()?;
+    let result: serde_json::Value = response.json().await.ok()?;
+    let file_path = result["result"]["file_path"].as_str()?;
+    Some(format!("https://api.telegram.org/file/bot{}/{}", bot_token, file_path))
+}
+
+async fn download_and_save_photo(file_url: String, folder_path: &String, file_id : &String) {    
+    let response = reqwest::get(&file_url).await;
+
+    match response {
+        Ok(response) => {
+
+            let extension = Some("jpg");
+            if let Some(extension) = extension {
+                let file_name = format!("{}/{}.{}", folder_path, file_id, extension);
+
+                // Use tokio::fs::File for asynchronous file I/O
+                let mut file = File::create(&file_name).await.unwrap();
+
+                let bytes_response = response.bytes().await.unwrap();
+                let bytes = bytes_response.as_ref();
+
+                // Use tokio::io::AsyncWriteExt to write asynchronously
+                file.write_all(bytes).await.unwrap();
+
+                println!("Downloaded and saved photo as: {}", file_name);
+            } else {
+                println!("Failed to determine file extension");
+            }
+        }
+        Err(err) => {
+            eprintln!("Error downloading photo: {:?}", err);
+        }
+    }
 }
 
 async fn set_telegram_webhook(bot_token: &str, ngrok_url: &str) -> Result<(), reqwest::Error> {
@@ -130,10 +192,10 @@ async fn set_telegram_webhook(bot_token: &str, ngrok_url: &str) -> Result<(), re
 #[actix_web::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Bot token can found in telegram @BotFather
-    let bot_token = "<YOUR_BOT_TOKEN>";
+    let bot_token = &CONFIG.telegram_bot_token;
 
     // This url is where the webhook update is posted to
-    let ngrok_url = "<YOUR_NGROK_URL>";
+    let ngrok_url = "https://2547-2406-3003-2073-4cdc-18d7-2c3-e0e1-4b2b.ngrok-free.app/";
 
     // Set up the Telegram webhook
     if let Err(err) = set_telegram_webhook(bot_token, ngrok_url).await {
