@@ -1,6 +1,6 @@
-use actix_web::{web, App, HttpServer, Result, HttpResponse};
-use serde::{Deserialize, Serialize};
+use actix_web::{web, App, HttpResponse, HttpServer, Result};
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
@@ -10,6 +10,8 @@ use config::Config;
 lazy_static::lazy_static! {
     static ref CONFIG: Config = Config::load();
 }
+mod routes;
+use routes::health::health;
 
 mod s3_handler;
 use s3_handler::s3_handler::upload_to_s3;
@@ -20,7 +22,7 @@ struct From {
     is_bot: bool,
     first_name: String,
     username: String,
-    language_code: String
+    language_code: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -29,7 +31,7 @@ struct PrivateChat {
     first_name: String,
     username: String,
     #[serde(rename = "type")]
-    chat_type: String
+    chat_type: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -37,14 +39,14 @@ struct SupergroupChat {
     id: i64,
     title: String,
     #[serde(rename = "type")]
-    chat_type: String
+    chat_type: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 enum Chat {
     Private(PrivateChat),
-    Supergroup(SupergroupChat)
+    Supergroup(SupergroupChat),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -53,7 +55,7 @@ struct Photo {
     file_unique_id: String,
     file_size: i64,
     width: i64,
-    height: i64
+    height: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -64,12 +66,12 @@ struct Message {
     date: i64,
     text: Option<String>,
     photo: Option<Vec<Photo>>,
-    caption: Option<String>
+    caption: Option<String>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 struct TelegramUpdate {
     update_id: i64,
-    message: Message
+    message: Message,
 }
 
 async fn handle_update(update: web::Json<TelegramUpdate>) -> Result<HttpResponse> {
@@ -77,16 +79,22 @@ async fn handle_update(update: web::Json<TelegramUpdate>) -> Result<HttpResponse
     let telegram_update: TelegramUpdate = update.into_inner();
 
     // println!("{}", serde_json::to_string(&telegram_update).unwrap());
-    println!("-----------------------------New update received, id: {}---------------------------------", telegram_update.update_id);
+    println!(
+        "-----------------------------New update received, id: {}---------------------------------",
+        telegram_update.update_id
+    );
     let mut group_name = String::new();
     // Check if the chat is private
-     if let Chat::Supergroup(supergroup_chat) = &telegram_update.message.chat {
+    if let Chat::Supergroup(supergroup_chat) = &telegram_update.message.chat {
         group_name = supergroup_chat.title.clone();
     }
 
     // Check if the message has text
     if let Some(text) = &telegram_update.message.text {
-        println!("Received text message: {} from {} in {}", text, telegram_update.message.from.username, group_name);
+        println!(
+            "Received text message: {} from {} in {}",
+            text, telegram_update.message.from.username, group_name
+        );
     }
 
     // Check if the message has photos
@@ -121,7 +129,6 @@ async fn handle_update(update: web::Json<TelegramUpdate>) -> Result<HttpResponse
 }
 
 async fn get_photo_url(file_id: &str) -> Option<String> {
-    // You need to replace <YOUR_BOT_TOKEN> with your actual bot token
     let bot_token = &CONFIG.telegram_bot_token;
     let url = format!(
         "https://api.telegram.org/bot{}/getFile?file_id={}",
@@ -131,10 +138,13 @@ async fn get_photo_url(file_id: &str) -> Option<String> {
     let response = reqwest::get(&url).await.ok()?;
     let result: serde_json::Value = response.json().await.ok()?;
     let file_path = result["result"]["file_path"].as_str()?;
-    Some(format!("https://api.telegram.org/file/bot{}/{}", bot_token, file_path))
+    Some(format!(
+        "https://api.telegram.org/file/bot{}/{}",
+        bot_token, file_path
+    ))
 }
 
-async fn download_and_save_photo(file_url: String, group_name: &String, file_id : &String) {    
+async fn download_and_save_photo(file_url: String, group_name: &String, file_id: &String) {
     let response = reqwest::get(&file_url).await;
 
     match response {
@@ -157,12 +167,12 @@ async fn download_and_save_photo(file_url: String, group_name: &String, file_id 
 
                 println!("Downloaded and saved photo as: {}", file_name);
 
-                upload_to_s3("snapture-dev-telegram-server-webapi", &group_name, &file_id, &file_name).await.unwrap();
-
+                upload_to_s3(&group_name, &file_id, &file_name)
+                    .await
+                    .unwrap();
             } else {
                 println!("Failed to determine file extension");
             }
-
         }
         Err(err) => {
             eprintln!("Error downloading photo: {:?}", err);
@@ -170,22 +180,15 @@ async fn download_and_save_photo(file_url: String, group_name: &String, file_id 
     }
 }
 
-async fn set_telegram_webhook(bot_token: &str, ngrok_url: &str) -> Result<(), reqwest::Error> {
-    let url = format!(
-        "https://api.telegram.org/bot{}/setWebhook",
-        bot_token
-    );
+async fn set_telegram_webhook(bot_token: &str, server_url: &str) -> Result<(), reqwest::Error> {
+    let url = format!("https://api.telegram.org/bot{}/setWebhook", bot_token);
 
     let mut form_data = HashMap::new();
-    form_data.insert("url", ngrok_url);
+    form_data.insert("url", server_url);
     form_data.insert("allowed_updates", "['messages']");
 
     let client = Client::new();
-    let response = client
-        .post(&url)
-        .form(&form_data)
-        .send()
-        .await?;
+    let response = client.post(&url).form(&form_data).send().await?;
 
     if response.status().is_success() {
         println!("Webhook set successfully");
@@ -202,18 +205,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bot_token = &CONFIG.telegram_bot_token;
 
     // This url is where the webhook update is posted to
-    let ngrok_url = "https://69fb-2406-3003-2073-4cdc-df7-9f10-c27b-f41d.ngrok-free.app";
+    // let server_url = "https://<uuid>.ngrok-free.app/";
+    let server_url = &CONFIG.server_url;
 
     // Set up the Telegram webhook
-    if let Err(err) = set_telegram_webhook(bot_token, ngrok_url).await {
+    if let Err(err) = set_telegram_webhook(bot_token, server_url).await {
         eprintln!("Failed to set webhook: {:?}", err);
     }
 
     // Set up Actix web server
     HttpServer::new(move || {
-        App::new().service(web::resource("/").route(web::post().to(handle_update)))
+        App::new()
+            .service(health)
+            .service(web::resource("/").route(web::post().to(handle_update)))
     })
-    .bind("127.0.0.1:80")? // Replace with your desired IP address and port
+    .bind(("0.0.0.0", 8000))? // Replace with your desired IP address and port
     .run()
     .await?;
 

@@ -4,7 +4,16 @@ use aws_sdk_s3 as s3;
 use std::error::Error;
 use std::path::Path;
 
-pub async fn upload_to_s3(bucket_name: &str, group_name: &str, file_id: &str, file_path: &str) -> Result<(), Box<dyn Error>> {
+use crate::config::Config;
+lazy_static::lazy_static! {
+    static ref CONFIG: Config = Config::load();
+}
+
+pub async fn upload_to_s3(
+    group_name: &str,
+    file_id: &str,
+    file_path: &str,
+) -> Result<(), Box<dyn Error>> {
     // Specify your AWS region
     let my_config = load_defaults(BehaviorVersion::latest()).await;
 
@@ -19,8 +28,9 @@ pub async fn upload_to_s3(bucket_name: &str, group_name: &str, file_id: &str, fi
     // Read the file into a buffer
     let body = s3::primitives::ByteStream::from_path(&file_content).await?;
 
-    let result = client.put_object()
-        .bucket(bucket_name)
+    let result = client
+        .put_object()
+        .bucket(&CONFIG.s3_bucket_name)
         .key(object_key)
         .body(body)
         .send()
