@@ -11,6 +11,9 @@ lazy_static::lazy_static! {
     static ref CONFIG: Config = Config::load();
 }
 
+mod s3_handler;
+use s3_handler::s3_handler::upload_to_s3;
+
 #[derive(Debug, Serialize, Deserialize)]
 struct From {
     id: i64,
@@ -107,10 +110,8 @@ async fn handle_update(update: web::Json<TelegramUpdate>) -> Result<HttpResponse
         for photo in filtered_photo {
             if let Some(file_url) = get_photo_url(&photo.file_id).await {
                 // Create a folder for the photos
-                let folder_path = format!("photos/{}", group_name);
-                fs::create_dir_all(&folder_path).await.unwrap();
                 println!("Downloading file.........");
-                download_and_save_photo(file_url, &folder_path, &photo.file_id).await;
+                download_and_save_photo(file_url, &group_name, &photo.file_id).await;
             }
         }
     }
@@ -133,11 +134,13 @@ async fn get_photo_url(file_id: &str) -> Option<String> {
     Some(format!("https://api.telegram.org/file/bot{}/{}", bot_token, file_path))
 }
 
-async fn download_and_save_photo(file_url: String, folder_path: &String, file_id : &String) {    
+async fn download_and_save_photo(file_url: String, group_name: &String, file_id : &String) {    
     let response = reqwest::get(&file_url).await;
 
     match response {
         Ok(response) => {
+            let folder_path = format!("photos/{}", group_name);
+            fs::create_dir_all(&folder_path).await.unwrap();
 
             let extension = Some("jpg");
             if let Some(extension) = extension {
@@ -153,9 +156,13 @@ async fn download_and_save_photo(file_url: String, folder_path: &String, file_id
                 file.write_all(bytes).await.unwrap();
 
                 println!("Downloaded and saved photo as: {}", file_name);
+
+                upload_to_s3("snapture-dev-telegram-server-webapi", &group_name, &file_id, &file_name).await.unwrap();
+
             } else {
                 println!("Failed to determine file extension");
             }
+
         }
         Err(err) => {
             eprintln!("Error downloading photo: {:?}", err);
@@ -195,7 +202,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bot_token = &CONFIG.telegram_bot_token;
 
     // This url is where the webhook update is posted to
-    let ngrok_url = "https://2547-2406-3003-2073-4cdc-18d7-2c3-e0e1-4b2b.ngrok-free.app/";
+    let ngrok_url = "https://69fb-2406-3003-2073-4cdc-df7-9f10-c27b-f41d.ngrok-free.app";
 
     // Set up the Telegram webhook
     if let Err(err) = set_telegram_webhook(bot_token, ngrok_url).await {
