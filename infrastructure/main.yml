@@ -8,6 +8,12 @@ Parameters:
   networkStackName:
     Type: String
     Default: cld-core-network
+  publicEcsStackName:
+    Type: String
+    Default: cld-core-public-ecs
+  securityStackName:
+    Type: String
+    Default: cld-core-security
   accountType:
     Type: String
     Default: dev
@@ -22,6 +28,25 @@ Parameters:
     Description: The port number on which the DB instances is the cluster accept connections
     Type: Number
     Default: 5432
+  dnsName:
+    Description: The CNAME record for this service
+    Type: String
+    Default: telegram-server-webapi
+
+Mappings:
+  environmentConfig:
+    dev:
+      logLevel: debug
+      taskCount: 0
+      cpu: 512
+      memory: 1024
+      memoryReservation: 512
+    prod:
+      logLevel: info
+      taskCount: 1
+      cpu: 512
+      memory: 1024
+      memoryReservation: 512
 
 Conditions:
   isProd: !Equals [!Ref accountType, 'prod']
@@ -45,16 +70,16 @@ Resources:
       DBClusterIdentifier: !Sub ${AWS::StackName}
       DatabaseName: !Ref dbName
       Engine: aurora-postgresql
-      MasterUsername: !Sub '{{resolve:secretsmanager:${dbClusterCredentials}:SecretString:username}}'
       ServerlessV2ScalingConfiguration:
         MinCapacity: 0.5
         MaxCapacity: 2 # max is 128 ACUs
+      MasterUsername: !Sub '{{resolve:secretsmanager:${dbClusterCredentials}:SecretString:username}}'
       MasterUserPassword: !Sub '{{resolve:secretsmanager:${dbClusterCredentials}:SecretString:password}}'
       DeletionProtection: !If [isProd, true, false]
       Port: !Ref dbClusterPort
-      DBSubnetGroupName: !Ref subnetGroup
+      DBSubnetGroupName: !Ref rdsSubnetGroup
       VpcSecurityGroupIds:
-        - !GetAtt securityGroup.GroupId
+        - !GetAtt rdsSecurityGroup.GroupId
       Tags:
         - Key: Stack_Name
           Value: !Ref AWS::StackName
@@ -94,7 +119,7 @@ Resources:
       TargetId: !Ref auroraServerlessCluster
       TargetType: AWS::RDS::DBCluster
 
-  subnetGroup:
+  rdsSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
     Properties:
       DBSubnetGroupDescription: Subnet group for Telegam Server Webapi Aurora cluster
@@ -102,11 +127,12 @@ Resources:
       SubnetIds:
         - { Fn::ImportValue: !Sub '${networkStackName}-${AWS::Region}-privateSubnetAZ1' }
         - { Fn::ImportValue: !Sub '${networkStackName}-${AWS::Region}-privateSubnetAZ2' }
+        - { Fn::ImportValue: !Sub '${networkStackName}-${AWS::Region}-privateSubnetAZ3' }
       Tags:
         - Key: Stack_Name
           Value: !Ref AWS::StackName
 
-  securityGroup:
+  rdsSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Permits access to Telegram Server Webapi Aurora cluster
@@ -116,3 +142,239 @@ Resources:
           FromPort: !Ref dbClusterPort
           ToPort: !Ref dbClusterPort
           CidrIp: { Fn::ImportValue: !Sub '${networkStackName}-${AWS::Region}-vpcCIDRBlock' }
+          Description: Allow access from VPC to Telegram Server Webapi Aurora cluster
+        - IpProtocol: tcp
+          FromPort: !Ref dbClusterPort
+          ToPort: !Ref dbClusterPort
+          SourceSecurityGroupId: { Fn::ImportValue: !Sub '${securityStackName}-${AWS::Region}-sgBastionHostAccess' }
+          Description: Allow access from bastion host to Telegram Server Webapi Aurora cluster
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-rds-sg
+
+  ecrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref AWS::StackName
+
+  httpsCert:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Join ['.', [!Ref dnsName, { Fn::ImportValue: !Sub '${accountStackName}-${AWS::Region}-internalDnsDomainName' }]]
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Join ['.', [!Ref dnsName, { Fn::ImportValue: !Sub '${accountStackName}-${AWS::Region}-internalDnsDomainName' }]]
+          HostedZoneId: { Fn::ImportValue: !Sub '${accountStackName}-${AWS::Region}-internalDnsZoneId' }
+
+  externalAlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub public-${AWS::StackName}
+      Type: application
+      Scheme: internet-facing
+      Subnets:
+        - Fn::ImportValue: !Sub '${networkStackName}-${AWS::Region}-publicSubnetAZ1'
+        - Fn::ImportValue: !Sub '${networkStackName}-${AWS::Region}-publicSubnetAZ2'
+        - Fn::ImportValue: !Sub '${networkStackName}-${AWS::Region}-publicSubnetAZ3'
+      SecurityGroups:
+        - { Fn::ImportValue: !Sub '${securityStackName}-${AWS::Region}-sgHttpHttpsPublicAccess' }
+      Tags:
+        - Key: Stack_Name
+          Value: !Ref AWS::StackName
+        - Key: Vpc_Id
+          Value: { Fn::ImportValue: !Sub '${networkStackName}-${AWS::Region}-VPC' }
+
+  # expose internal domain to public
+  externalAlbCname:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName: { Fn::ImportValue: !Sub '${accountStackName}-${AWS::Region}-internalDnsZone' }
+      Name: !Join ['.', [!Ref dnsName, { Fn::ImportValue: !Sub '${accountStackName}-${AWS::Region}-internalDnsZone' }]]
+      Type: CNAME
+      TTL: 600
+      ResourceRecords:
+        - !GetAtt externalAlb.DNSName
+
+  externalAlbTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn:
+      - externalAlb
+    Properties:
+      Name: !Sub public-${AWS::StackName}
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      VpcId: { Fn::ImportValue: !Sub '${networkStackName}-${AWS::Region}-VPC' }
+      HealthCheckPath: /health
+      Matcher:
+        HttpCode: 200-299
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 60
+      Tags:
+        - Key: Stack_Name
+          Value: !Ref AWS::StackName
+        - Key: Vpc_Id
+          Value: { Fn::ImportValue: !Sub '${networkStackName}-${AWS::Region}-VPC' }
+
+  externalAlbHttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref externalAlb
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: 443
+            Host: '#{host}'
+            Path: '/#{path}'
+            Query: '#{query}'
+            StatusCode: HTTP_301
+
+  externalAlbHttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref externalAlb
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref httpsCert
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref externalAlbTargetGroup
+
+  ecsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: !Sub /${AWS::StackName}/
+      RoleName: !Sub ${AWS::StackName}-ecs-task-execution-role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: !Sub ${AWS::StackName}-ecs-task-secrets-access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameters
+                Resource:
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/ecs/${AWS::StackName}/*
+
+  ecsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: !Sub /${AWS::StackName}/
+      RoleName: !Sub ${AWS::StackName}-ecs-task-role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/Cloudwatch
+      Policies:
+        - PolicyName: s3-access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:PutObject
+                Resource:
+                  - !GetAtt s3Bucket.Arn
+                  - !Sub ${s3Bucket.Arn}/*
+
+  ecsTask:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Ref AWS::StackName
+      ExecutionRoleArn: !GetAtt ecsTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ecsTaskRole.Arn
+      ContainerDefinitions:
+        - Name: !Ref AWS::StackName
+          Image: !Join [':', [!GetAtt ecrRepository.RepositoryUri, 'latest']]
+          DnsSearchDomains:
+            - { Fn::ImportValue: !Sub '${accountStackName}-${AWS::Region}-internalDnsDomainName' }
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref logGroup
+              awslogs-region: !Ref AWS::Region
+          EntryPoint: []
+          PortMappings:
+            - ContainerPort: 8000
+          Command: []
+          Cpu: !FindInMap [environmentConfig, !Ref accountType, cpu]
+          Memory: !FindInMap [environmentConfig, !Ref accountType, memory]
+          MemoryReservation: !FindInMap [environmentConfig, !Ref accountType, memoryReservation]
+          Environment:
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: SERVER_URL
+              Value: !Sub https://${externalAlbCname}
+            - Name: S3_BUCKET_NAME
+              Value: !Ref s3Bucket
+          Secrets:
+            - Name: TELEGRAM_BOT_TOKEN
+              ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/ecs/${AWS::StackName}/telegram-bot-token
+          Ulimits:
+            - Name: nofile
+              HardLimit: 65536
+              SoftLimit: 65536
+          DnsServers: []
+          MountPoints: []
+          DockerSecurityOptions: []
+          VolumesFrom: []
+          Essential: true
+          ExtraHosts: []
+          DockerLabels: {}
+          ReadonlyRootFilesystem: false
+          Privileged: false
+
+  ecsService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - externalAlb
+      - externalAlbHttpListener
+      - externalAlbHttpsListener
+    Properties:
+      ServiceName: !Ref AWS::StackName
+      Cluster: { Fn::ImportValue: !Sub '${publicEcsStackName}-${AWS::Region}-publicEcsCluster' }
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 50
+      DesiredCount: !FindInMap [environmentConfig, !Ref accountType, taskCount]
+      LoadBalancers:
+        - ContainerName: !Ref AWS::StackName
+          ContainerPort: 8000
+          TargetGroupArn: !Ref externalAlbTargetGroup
+      PlacementStrategies:
+        - Type: spread
+          Field: attribute:ecs.availability-zone
+      TaskDefinition: !Ref ecsTask
+      Role: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/ecs.amazonaws.com/AWSServiceRoleForECS
+
+  logGroup:
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Ref AWS::StackName
+      RetentionInDays: 7
