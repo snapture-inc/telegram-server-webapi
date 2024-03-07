@@ -24,6 +24,7 @@ pub async fn upload_to_s3(
     let client = s3::Client::new(&my_config);
 
     let file_content = Path::new(&file_path);
+    let s3_path = format!("{}/{}", &CONFIG.s3_bucket_name, object_key);
 
     // Read the file into a buffer
     let body = s3::primitives::ByteStream::from_path(&file_content).await?;
@@ -31,7 +32,7 @@ pub async fn upload_to_s3(
     let result = client
         .put_object()
         .bucket(&CONFIG.s3_bucket_name)
-        .key(object_key.clone())
+        .key(object_key)
         .body(body)
         .send()
         .await;
@@ -39,7 +40,7 @@ pub async fn upload_to_s3(
     match result {
         Ok(_) => {
             println!("File uploaded to S3 successfully.");
-            Ok(object_key)
+            Ok(s3_path)
         }
         Err(err) => {
             println!("Failed to create S3 object. Error: {:?}", err);

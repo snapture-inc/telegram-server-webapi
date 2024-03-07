@@ -1,4 +1,5 @@
-use crate::{Message, Chat};
+use crate::{Message, Chat, HashMap};
+use aws_sdk_dynamodb::operation::put_item::PutItemInput;
 use aws_sdk_dynamodb::types::AttributeValue;
 use aws_sdk_dynamodb::Client;
 use aws_config::BehaviorVersion;
@@ -27,18 +28,34 @@ pub async fn store_message_in_dynamodb(message: &Message, image_path: &str) -> R
     // Construct the composite sort key value
     let sort_key_value: String = format!("{}#{}", project_id, datetime_utc);
 
+    let mut item: HashMap<String, AttributeValue> = HashMap::new();
+    item.insert("CompanyName".to_string(), AttributeValue::S("TestCompany".to_string()));
+    item.insert("ProjectId_Date".to_string(), AttributeValue::S(sort_key_value.clone()));
+    item.insert("MessageId".to_string(), AttributeValue::S(message.message_id.to_string()));
+
+    // Conditionally add TextMessage attribute if message.text is not empty
+    if let Some(text) = &message.text {
+        if !text.is_empty() {
+            item.insert("TextMessage".to_string(), AttributeValue::S(text.clone()));
+        }
+    }
+
+    // Conditionally add ImagePath attribute if image_path is not empty
+    if !image_path.is_empty() {
+        item.insert("ImagePath".to_string(), AttributeValue::S(image_path.to_string()));
+    }
+
+    // Conditionally add Caption attribute if message.caption is not empty
+    if let Some(caption) = &message.caption {
+        if !caption.is_empty() {
+            item.insert("Caption".to_string(), AttributeValue::S(caption.clone()));
+        }
+    }
+
+    let input = PutItemInput::builder().table_name("TgChatMessages").set_item(Some(item));
+
     // Construct the item to be saved in DynamoDB
-    let result = client
-        .put_item()
-        .table_name("TgChatMessages")
-        .item("CompanyName", AttributeValue::S("TestCompany".to_string()))
-        .item("ProjectId_Date", AttributeValue::S(sort_key_value.clone()))
-        .item("MessageId", AttributeValue::S(message.message_id.to_string()))
-        .item("TextMessage", AttributeValue::S(message.text.clone().unwrap_or_default()))
-        .item("ImagePath", AttributeValue::S(image_path.to_string()))
-        .item("Caption", AttributeValue::S(message.caption.clone().unwrap_or_default()))
-        .send()
-        .await;
+    let result = input.send_with(&client).await;
 
     match result {
         Ok(_) => {
