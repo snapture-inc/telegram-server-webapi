@@ -16,6 +16,10 @@ use routes::health::health;
 mod s3_handler;
 use s3_handler::s3_handler::upload_to_s3;
 
+mod database;
+use database::database::store_message_in_dynamodb;
+
+
 #[derive(Debug, Serialize, Deserialize)]
 struct From {
     id: i64,
@@ -91,6 +95,7 @@ async fn handle_update(update: web::Json<TelegramUpdate>) -> Result<HttpResponse
 
     // Check if the message has text
     if let Some(text) = &telegram_update.message.text {
+        store_message_in_dynamodb(&telegram_update.message, "").await.unwrap();
         println!(
             "Received text message: {} from {} in {}",
             text, telegram_update.message.from.username, group_name
@@ -119,7 +124,13 @@ async fn handle_update(update: web::Json<TelegramUpdate>) -> Result<HttpResponse
             if let Some(file_url) = get_photo_url(&photo.file_id).await {
                 // Create a folder for the photos
                 println!("Downloading file.........");
-                download_and_save_photo(file_url, &group_name, &photo.file_id).await;
+                let file_name = download_and_save_photo(file_url, &group_name, &photo.file_id).await;
+                if let Some(file_name) = file_name {
+                    if let Ok(image_s3_path) = upload_to_s3(&group_name, &photo.file_id, &file_name).await {
+                        // Store message and image S3 path in DynamoDB
+                        store_message_in_dynamodb(&telegram_update.message, &image_s3_path).await.unwrap();
+                    }
+                }
             }
         }
     }
@@ -144,7 +155,7 @@ async fn get_photo_url(file_id: &str) -> Option<String> {
     ))
 }
 
-async fn download_and_save_photo(file_url: String, group_name: &String, file_id: &String) {
+async fn download_and_save_photo(file_url: String, group_name: &String, file_id: &String) -> Option<String> {
     let response = reqwest::get(&file_url).await;
 
     match response {
@@ -166,16 +177,16 @@ async fn download_and_save_photo(file_url: String, group_name: &String, file_id:
                 file.write_all(bytes).await.unwrap();
 
                 println!("Downloaded and saved photo as: {}", file_name);
+                Some(file_name)
 
-                upload_to_s3(&group_name, &file_id, &file_name)
-                    .await
-                    .unwrap();
             } else {
                 println!("Failed to determine file extension");
+                None
             }
         }
         Err(err) => {
             eprintln!("Error downloading photo: {:?}", err);
+            None
         }
     }
 }
@@ -206,7 +217,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // This url is where the webhook update is posted to
     // let server_url = "https://<uuid>.ngrok-free.app/";
-    let server_url = &CONFIG.server_url;
+    let server_url = "https://59ee-2406-3003-2073-4cdc-413a-9e9b-f2ea-43bf.ngrok-free.app/";
 
     // Set up the Telegram webhook
     if let Err(err) = set_telegram_webhook(bot_token, server_url).await {

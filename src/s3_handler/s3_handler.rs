@@ -13,7 +13,7 @@ pub async fn upload_to_s3(
     group_name: &str,
     file_id: &str,
     file_path: &str,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<String, Box<dyn Error>> {
     // Specify your AWS region
     let my_config = load_defaults(BehaviorVersion::latest()).await;
 
@@ -31,7 +31,7 @@ pub async fn upload_to_s3(
     let result = client
         .put_object()
         .bucket(&CONFIG.s3_bucket_name)
-        .key(object_key)
+        .key(object_key.clone())
         .body(body)
         .send()
         .await;
@@ -39,11 +39,15 @@ pub async fn upload_to_s3(
     match result {
         Ok(_) => {
             println!("File uploaded to S3 successfully.");
+            Ok(object_key)
         }
         Err(err) => {
             println!("Failed to create S3 object. Error: {:?}", err);
+            Err(err.into())
         }
     }
-
-    Ok(())
 }
+
+
+
+
