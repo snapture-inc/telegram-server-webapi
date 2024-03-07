@@ -4,7 +4,7 @@ use aws_sdk_dynamodb::Client;
 use aws_config::BehaviorVersion;
 use aws_config::load_defaults;
 use std::error::Error;
-use chrono::{TimeZone, NaiveDateTime, Utc};
+use chrono::DateTime;
 
 pub async fn store_message_in_dynamodb(message: &Message, image_path: &str) -> Result<(), Box<dyn Error>> {
     // Create a DynamoDB client
@@ -17,17 +17,15 @@ pub async fn store_message_in_dynamodb(message: &Message, image_path: &str) -> R
     };
 
 
-    let mut datetime_utc = Utc::now();
-    if let Some(naive_datetime) = NaiveDateTime::from_timestamp_opt(message.date, 0) {        
-        datetime_utc = Utc.from_utc_datetime(&naive_datetime);
-        
-        println!("UTC Date String: {}", datetime_utc.with_timezone(&chrono_tz::Asia::Singapore).format("%Y-%m-%dT%H:%M:%SZ").to_string());
+    let mut datetime_utc = String::new();
+    if let Some(datetime) = DateTime::from_timestamp(message.date, 0) {     
+        datetime_utc = datetime.with_timezone(&chrono_tz::Asia::Singapore).format("%Y-%m-%dT%H:%M:%SZ").to_string();           
     } else {
         println!("Invalid timestamp");
     }
     
     // Construct the composite sort key value
-    let sort_key_value: String = format!("{}#{}", project_id, datetime_utc.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+    let sort_key_value: String = format!("{}#{}", project_id, datetime_utc);
 
     // Construct the item to be saved in DynamoDB
     let result = client

@@ -19,7 +19,7 @@ pub async fn upload_to_s3(
 
     // Specify the S3 object key (file name) using the file_id
     let object_key = format!("{}/{}.jpg", group_name, file_id);
-
+    // println!("{object_key}");
     // Initialize the AWS SDK S3 client
     let client = s3::Client::new(&my_config);
 
